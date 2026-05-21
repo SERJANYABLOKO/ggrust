@@ -147,51 +147,57 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='HTML')
 
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /login - вход через Steam"""
     user_id = update.effective_user.id
-    
-    # Проверяем, не выполнен ли уже вход
+
     if user_id in user_sessions:
-        await update.message.reply_text(
-            "❌ Вы уже выполнили вход!\n"
-            "Используйте /logout для выхода из текущего аккаунта"
-        )
+        await update.message.reply_text("❌ Вы уже выполнили вход! Используйте /logout")
         return
-    
-    await update.message.reply_text(
-        "🔐 <b>Подготовка к входу в Steam...</b>\n\n"
-        "Пожалуйста, подождите, генерирую QR-код...",
-        parse_mode='HTML'
-    )
-    
-    # Создаем менеджер авторизации
+
+    await update.message.reply_text("🔐 Подготовка к входу... Генерирую QR-код...")
+
     auth_manager = SteamAuthManager(user_id)
     context.user_data['auth_manager'] = auth_manager
-    
-    # Начинаем процесс входа
-    qr_data, message = await auth_manager.start_login()
-    
+
+    # Запускаем процесс входа
+    auth_manager.client.cli_login()
+
+    # Ждем появления QR-кода (увеличиваем таймаут и добавляем проверку)
+    qr_data = None
+    for _ in range(45):  # Ждем до 45 секунд
+        if auth_manager.qr_generated and auth_manager.qr_data:
+            qr_data = auth_manager.qr_data
+            break
+        await asyncio.sleep(1)
+
     if not qr_data:
-        await update.message.reply_text(f"❌ Ошибка: {message}")
+        await update.message.reply_text("❌ Не удалось получить QR-код. Попробуйте позже.")
         return
-    
-    # Создаем QR-код
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
+
+    # Генерация картинки
+    qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(qr_data)
     qr.make(fit=True)
-    
     img = qr.make_image(fill_color="black", back_color="white")
-    
-    # Сохраняем в буфер
+
     bio = BytesIO()
     bio.name = 'qrcode.png'
     img.save(bio, 'PNG')
     bio.seek(0)
+
+    await update.message.reply_photo(
+        photo=bio,
+        caption="✅ Отсканируйте QR-код в мобильном приложении Steam (Настройки -> Авторизация по QR).\n\n⏳ Код действителен 2 минуты."
+    )
+
+    # Ожидание подтверждения с увеличенным таймаутом
+    await update.message.reply_text("⏳ Ожидание подтверждения входа...")
+    success, result = await auth_manager.check_login_status()
+
+    if success:
+        user_sessions[user_id] = auth_manager
+        await update.message.reply_text(f"✅ Вход выполнен! Добро пожаловать, {result}.")
+    else:
+        await update.message.reply_text(f"❌ Ошибка: {result}")
     
     # Отправляем QR-код
     await update.message.reply_photo(
