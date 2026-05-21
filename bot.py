@@ -6,10 +6,6 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from steam import SteamClient
 import qrcode
 from io import BytesIO
-from dotenv import load_dotenv
-
-# Загрузка переменных окружения
-load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
@@ -227,6 +223,7 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 <b>Имя пользователя:</b> {user_info['name']}\n"
             f"🆔 <b>Steam ID:</b> {user_info['id']}\n"
             f"🌍 <b>Страна:</b> {user_info.get('country', 'Не указана')}\n\n"
+            f"💰 <b>Баланс кошелька:</b> {user_info.get('wallet', 0)} $\n\n"
             f"Используйте /profile для просмотра информации\n"
             f"Используйте /logout для выхода"
         )
@@ -277,7 +274,8 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 <b>Профиль Steam</b>\n\n"
         f"🔹 <b>Имя:</b> {user_info['name']}\n"
         f"🔹 <b>Steam ID:</b> {user_info['id']}\n"
-        f"🔹 <b>Страна:</b> {user_info.get('country', 'Не указана')}\n\n"
+        f"🔹 <b>Страна:</b> {user_info.get('country', 'Не указана')}\n"
+        f"🔹 <b>Баланс:</b> {user_info.get('wallet', 0)} $\n\n"
         f"✅ <b>Статус:</b> Активен"
     )
     
