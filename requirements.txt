@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
-steam[client]==1.4.4
+steam==1.4.4
 qrcode==7.4.2
-Pillow==10.1.0
+Pillow==10.3.0
