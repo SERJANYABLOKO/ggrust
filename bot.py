@@ -1,9 +1,11 @@
 import os
 import asyncio
 import logging
+from threading import Thread
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from steam import SteamClient
+from steam.client import SteamClient  # <--- ИСПРАВЛЕННЫЙ ИМПОРТ
 import qrcode
 from io import BytesIO
 
