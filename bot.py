@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 from steam.client import SteamClient
 from steam.enums import EResult
-import threading
+import random
 
 # Настройка логирования
 logging.basicConfig(
@@ -36,7 +36,7 @@ class SteamAuthManager:
         
         @self.client.on('login_error')
         def handle_login_error(result):
-            logger.error(f"Login error: {result}")
+            logger.error(f"Login error for user {self.user_id}: {result}")
             self.login_success = False
             self.login_result = {'success': False, 'message': str(result)}
     
@@ -46,6 +46,9 @@ class SteamAuthManager:
         self.login_result = None
         
         try:
+            # Устанавливаем таймауты для подключения
+            self.client.set_connection_timeout(30)
+            
             # Пытаемся войти
             if twofa_code:
                 result = self.client.login(
@@ -59,29 +62,44 @@ class SteamAuthManager:
                     password=password
                 )
             
+            # Обработка кодов ошибок
             if result == EResult.OK:
                 logger.info(f"Login OK for {username}")
-                # Ждем confirmation
                 time.sleep(2)
-                if self.login_success:
-                    return {'success': True, 'message': 'Вход выполнен'}
-                return {'success': True, 'message': 'Вход выполнен'}
+                return {'success': True, 'message': 'Вход выполнен успешно'}
+            
             elif result == EResult.InvalidPassword:
-                return {'success': False, 'message': 'Неверный логин или пароль'}
+                return {'success': False, 'message': '❌ Неверный логин или пароль'}
+            
             elif result == EResult.AccountLogonDenied:
-                return {'success': False, 'needs_2fa': True, 'message': 'Требуется код Steam Guard'}
+                return {'success': False, 'needs_2fa': True, 'message': '🔐 Требуется код Steam Guard'}
+            
             elif result == EResult.TwoFactorCodeMismatch:
-                return {'success': False, 'message': 'Неверный код 2FA'}
+                return {'success': False, 'message': '❌ Неверный код двухфакторной аутентификации'}
+            
             elif result == EResult.ServiceUnavailable:
-                return {'success': False, 'message': 'Сервис Steam недоступен. Попробуйте позже'}
+                return {'success': False, 'message': '⚠️ Сервис Steam временно недоступен. Попробуйте через 5-10 минут'}
+            
             elif result == EResult.RateLimitExceeded:
-                return {'success': False, 'message': 'Слишком много попыток. Подождите 10 минут'}
+                return {'success': False, 'message': '⚠️ Слишком много попыток входа! Steam заблокировал вход на 30-60 минут.\n\n💡 Решение:\n• Подождите 1 час\n• Войдите в Steam через браузер\n• Используйте VPN'}
+            
+            elif result == EResult.TryAnotherCM:
+                return {'success': False, 'message': '🔄 Попробуйте другой сервер подключения. Подождите 5 минут'}
+            
+            elif result == 85:  # RateLimitExceeded
+                return {'success': False, 'message': '⚠️ Лимит попыток входа превышен! (Ошибка 85)\n\nПодождите 1 час перед следующей попыткой.\nВойдите в Steam через браузер для разблокировки.'}
+            
             else:
-                return {'success': False, 'message': f'Ошибка: {result}'}
+                return {'success': False, 'message': f'❌ Ошибка {result}\n\nПопробуйте позже или войдите через браузер Steam'}
                 
         except Exception as e:
-            logger.error(f"Login error: {e}")
-            return {'success': False, 'message': f'Ошибка: {str(e)}'}
+            error_msg = str(e)
+            logger.error(f"Login error: {error_msg}")
+            
+            if "Timeout" in error_msg or "timeout" in error_msg:
+                return {'success': False, 'message': '⏰ Таймаут подключения. Проверьте соединение или попробуйте VPN'}
+            else:
+                return {'success': False, 'message': f'❌ Техническая ошибка: {error_msg[:100]}'}
     
     def get_user_info(self):
         try:
@@ -122,7 +140,9 @@ def start(update: Update, context):
 2. Введите логин (НЕ email)
 3. Введите пароль
 4. Если есть Steam Guard - введите код
-    """
+
+⚠️ <b>Важно:</b> При ошибке "RateLimitExceeded (85)" подождите 1 час
+"""
     
     keyboard = [[InlineKeyboardButton("🔑 Войти", callback_data="login_steam")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -131,24 +151,30 @@ def start(update: Update, context):
 
 def help_command(update: Update, context):
     help_text = """
-📚 <b>Помощь</b>
+📚 <b>Помощь по ошибкам</b>
 
-<b>Вход:</b>
-/login - начать вход
-Введите логин (имя пользователя, НЕ email)
-Введите пароль
-При наличии Steam Guard - код из приложения
+<b>❌ Ошибка 85 (RateLimitExceeded):</b>
+• Слишком много неудачных попыток входа
+• Steam временно заблокировал вход
+• <b>Решение:</b> Подождите 1 час, затем войдите в Steam через браузер
 
-<b>Ошибки:</b>
-• InvalidPassword - неверный логин/пароль
-• AccountLogonDenied - нужен код Steam Guard
-• RateLimitExceeded - подождите 10 минут
-• ServiceUnavailable - сервер Steam занят
+<b>❌ InvalidPassword:</b>
+• Неверный логин или пароль
+• <b>Решение:</b> Проверьте данные, используйте имя пользователя (НЕ email)
 
-<b>Решение проблем:</b>
-1. Войдите в Steam через браузер
-2. Убедитесь, что используете имя пользователя
-3. Подождите 10-15 минут
+<b>❌ AccountLogonDenied:</b>
+• Требуется код Steam Guard
+• <b>Решение:</b> Введите код из приложения Steam
+
+<b>⚠️ ServiceUnavailable:</b>
+• Серверы Steam перегружены
+• <b>Решение:</b> Подождите 10-15 минут
+
+<b>💡 Общие советы:</b>
+1. Войдите в Steam через браузер перед использованием бота
+2. Убедитесь, что аккаунт не заблокирован
+3. Используйте VPN если Steam недоступен в вашем регионе
+4. Не делайте много попыток подряд - ждите между ними
 """
     update.message.reply_text(help_text, parse_mode='HTML')
 
@@ -163,13 +189,15 @@ def login(update: Update, context):
         update.message.reply_text("⚠️ Вход уже начат! Используйте /cancel")
         return
     
-    pending_logins[user_id] = {'step': 'username'}
+    pending_logins[user_id] = {'step': 'username', 'attempts': 0}
     
     update.message.reply_text(
         "🔐 <b>Вход в Steam</b>\n\n"
         "Отправьте ваш <b>логин</b> (имя пользователя):\n"
         "<i>Пример: your_username</i>\n\n"
-        "⚠️ Это НЕ email!\n"
+        "⚠️ <b>Важно:</b>\n"
+        "• Используйте имя пользователя, НЕ email\n"
+        "• При ошибке 85 подождите 1 час\n\n"
         "Для отмены: /cancel",
         parse_mode='HTML'
     )
@@ -207,7 +235,7 @@ def profile(update: Update, context):
     user_info = auth_manager.get_user_info()
     
     if not user_info:
-        update.message.reply_text("❌ Не удалось получить информацию")
+        update.message.reply_text("❌ Не удалось получить информацию. Возможно сессия истекла.\nИспользуйте /login")
         return
     
     text = f"👤 <b>Профиль Steam</b>\n\n🔹 Имя: {user_info['name']}\n🔹 Steam ID: {user_info['id']}\n\n✅ Статус: Активен"
@@ -227,17 +255,47 @@ def handle_message(update: Update, context):
             
             pending_logins[user_id]['username'] = text
             pending_logins[user_id]['step'] = 'password'
-            update.message.reply_text(f"✅ Логин: {text}\n\nТеперь отправьте <b>пароль</b>:\n/cancel - отмена", parse_mode='HTML')
+            update.message.reply_text(
+                f"✅ Логин: {text}\n\n"
+                f"Теперь отправьте <b>пароль</b>:\n"
+                f"/cancel - отмена\n\n"
+                f"⚠️ <b>Важно:</b> При ошибке 85 подождите 1 час",
+                parse_mode='HTML'
+            )
             
         elif step == 'password':
             if len(text) < 3:
                 update.message.reply_text("❌ Слишком короткий пароль. Попробуйте снова")
                 return
             
+            # Увеличиваем счетчик попыток
+            pending_logins[user_id]['attempts'] = pending_logins[user_id].get('attempts', 0) + 1
+            attempts = pending_logins[user_id]['attempts']
+            
+            if attempts >= 3:
+                update.message.reply_text(
+                    "⚠️ <b>Слишком много попыток!</b>\n\n"
+                    "Steam может временно заблокировать вход.\n"
+                    "Подождите 30-60 минут перед следующей попыткой.\n\n"
+                    "Также рекомендуется:\n"
+                    "1. Войти в Steam через браузер\n"
+                    "2. Использовать VPN\n"
+                    "3. Проверить правильность данных\n\n"
+                    "Используйте /login через час",
+                    parse_mode='HTML'
+                )
+                del pending_logins[user_id]
+                return
+            
             username = pending_logins[user_id]['username']
             password = text
             
-            status_msg = update.message.reply_text(f"⏳ Вход в Steam для <b>{username}</b>...\nЭто может занять до 30 секунд", parse_mode='HTML')
+            status_msg = update.message.reply_text(
+                f"⏳ Вход в Steam для <b>{username}</b>...\n"
+                f"Попытка {attempts}/3\n"
+                f"Это может занять до 30 секунд",
+                parse_mode='HTML'
+            )
             
             # Создаем менеджер и пробуем войти
             auth_manager = SteamAuthManager(user_id)
@@ -262,13 +320,23 @@ def handle_message(update: Update, context):
                 user_sessions[user_id] = auth_manager
                 del pending_logins[user_id]
                 update.message.reply_text(
-                    f"✅ <b>Вход выполнен!</b>\n\n👤 {username}\n\n/profile - информация\n/logout - выход",
+                    f"✅ <b>Вход выполнен!</b>\n\n"
+                    f"👤 {username}\n\n"
+                    f"/profile - информация\n"
+                    f"/logout - выход",
                     parse_mode='HTML'
                 )
             else:
-                del pending_logins[user_id]
+                # Не удаляем pending_login, чтобы можно было попробовать снова
+                if attempts >= 3:
+                    del pending_logins[user_id]
+                
                 update.message.reply_text(
-                    f"❌ <b>Ошибка</b>\n\n{result['message']}\n\n/login - новая попытка",
+                    f"❌ <b>Ошибка входа</b>\n\n"
+                    f"{result['message']}\n\n"
+                    f"Осталось попыток: {3 - attempts}\n\n"
+                    f"/login - начать заново\n"
+                    f"/cancel - отменить",
                     parse_mode='HTML'
                 )
                 
@@ -294,13 +362,18 @@ def handle_message(update: Update, context):
                 user_sessions[user_id] = auth_manager
                 del pending_logins[user_id]
                 update.message.reply_text(
-                    f"✅ <b>Вход выполнен!</b>\n\n👤 {username}\n\n/profile - информация\n/logout - выход",
+                    f"✅ <b>Вход выполнен!</b>\n\n"
+                    f"👤 {username}\n\n"
+                    f"/profile - информация\n"
+                    f"/logout - выход",
                     parse_mode='HTML'
                 )
             else:
                 del pending_logins[user_id]
                 update.message.reply_text(
-                    f"❌ <b>Ошибка</b>\n\n{result['message']}\n\n/login - новая попытка",
+                    f"❌ <b>Ошибка</b>\n\n"
+                    f"{result['message']}\n\n"
+                    f"/login - новая попытка",
                     parse_mode='HTML'
                 )
     else:
@@ -343,7 +416,7 @@ def main():
     except:
         pass
     
-    # Создаем Updater (синхронная версия)
+    # Создаем Updater
     updater = Updater(token, use_context=True)
     dp = updater.dispatcher
     
@@ -361,7 +434,7 @@ def main():
     logger.info("🚀 Бот запущен")
     print("✅ Бот успешно запущен!")
     
-    # Запускаем с очисткой старых обновлений
+    # Запускаем
     updater.start_polling(drop_pending_updates=True)
     updater.idle()
 
