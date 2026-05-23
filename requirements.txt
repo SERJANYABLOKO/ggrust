@@ -1,7 +1,5 @@
 python-telegram-bot==20.7
 steam[client]==1.4.4
-qrcode==7.4.2
 Pillow>=10.4.0
-flask
-gunicorn
-gevent-eventemitter
+flask==2.3.3
+gunicorn==21.2.0
