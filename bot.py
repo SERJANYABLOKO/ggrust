@@ -1,12 +1,10 @@
 import os
 import asyncio
 import logging
-from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from steam.client import SteamClient
 from steam.enums import EResult
-import time
 import traceback
 
 # Настройка логирования
@@ -27,7 +25,6 @@ class SteamAuthManager:
         self.login_event = asyncio.Event()
         self.login_success = False
         self.error_message = None
-        self.needs_2fa = False
         self.setup_handlers()
     
     def setup_handlers(self):
@@ -53,7 +50,6 @@ class SteamAuthManager:
         self.login_event.clear()
         self.login_success = False
         self.error_message = None
-        self.needs_2fa = False
         
         try:
             # Запускаем подключение к Steam в отдельном потоке
@@ -61,14 +57,19 @@ class SteamAuthManager:
             
             def do_login():
                 try:
-                    # Устанавливаем параметры подключения
-                    self.client.set_credentional(username, password)
-                    
-                    # Пытаемся войти
+                    # Правильный метод для установки логина (или передаем прямо в login)
+                    # Пытаемся войти напрямую
                     if twofa_code:
-                        result = self.client.login(username=username, password=password, two_factor_code=twofa_code)
+                        result = self.client.login(
+                            username=username,
+                            password=password,
+                            two_factor_code=twofa_code
+                        )
                     else:
-                        result = self.client.login(username=username, password=password)
+                        result = self.client.login(
+                            username=username,
+                            password=password
+                        )
                     
                     if result == EResult.OK:
                         logger.info(f"Login API call successful for {username}")
@@ -76,20 +77,21 @@ class SteamAuthManager:
                     elif result == EResult.InvalidPassword:
                         return {'success': False, 'message': 'Неверный логин или пароль'}
                     elif result == EResult.AccountLogonDenied:
-                        self.needs_2fa = True
                         return {'success': False, 'needs_2fa': True, 'message': 'Требуется код Steam Guard'}
                     elif result == EResult.TwoFactorCodeMismatch:
                         return {'success': False, 'message': 'Неверный код двухфакторной аутентификации'}
                     elif result == EResult.ServiceUnavailable:
                         return {'success': False, 'message': 'Сервис Steam временно недоступен. Попробуйте позже'}
                     elif result == EResult.RateLimitExceeded:
-                        return {'success': False, 'message': 'Слишком много попыток входа. Подождите несколько минут'}
+                        return {'success': False, 'message': 'Слишком много попыток входа. Подождите 5-10 минут'}
+                    elif result == EResult.TryAnotherCM:
+                        return {'success': False, 'message': 'Попробуйте другой сервер подключения'}
                     else:
                         return {'success': False, 'message': f'Ошибка: {result}'}
                         
                 except Exception as e:
                     logger.error(f"Login exception: {e}\n{traceback.format_exc()}")
-                    return {'success': False, 'message': f'Ошибка подключения: {str(e)}'}
+                    return {'success': False, 'message': f'Ошибка: {str(e)}'}
             
             # Выполняем вход в потоке
             result = await loop.run_in_executor(None, do_login)
@@ -97,13 +99,15 @@ class SteamAuthManager:
             if result['success']:
                 # Ждем события logged_on
                 try:
-                    await asyncio.wait_for(self.login_event.wait(), timeout=10)
+                    await asyncio.wait_for(self.login_event.wait(), timeout=15)
                     if self.login_success:
                         return {'success': True, 'message': 'Вход выполнен успешно'}
                     else:
                         return {'success': False, 'message': self.error_message or 'Ошибка при входе'}
                 except asyncio.TimeoutError:
                     return {'success': False, 'message': 'Превышено время ожидания входа'}
+            elif result.get('needs_2fa'):
+                return result
             else:
                 return result
                 
@@ -120,20 +124,9 @@ class SteamAuthManager:
                     'id': str(self.client.steam_id) if self.client.steam_id else 'Unknown',
                     'logged_on': True
                 }
-                
-                # Пытаемся получить дополнительную информацию
-                try:
-                    if hasattr(self.client, 'get_user_info'):
-                        info = self.client.get_user_info()
-                        if info:
-                            user_info['country'] = info.get('country', 'Не указана')
-                except:
-                    pass
-                
                 return user_info
         except Exception as e:
             logger.error(f"Error getting user info: {e}")
-        
         return None
     
     async def logout(self):
@@ -165,9 +158,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>Как войти:</b>
 1. Нажмите /login
-2. Введите логин Steam
+2. Введите логин Steam (НЕ EMAIL, а имя пользователя)
 3. Введите пароль
-4. Если включена двухфакторная аутентификация - введите код из приложения Steam Guard
+4. Если включен Steam Guard - введите код из приложения
     """
     
     keyboard = [
@@ -189,30 +182,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>🔐 Вход через Steam</b>
 • Используйте команду /login
-• Введите логин от аккаунта Steam (не email!)
+• Введите логин от аккаунта Steam (НЕ email)
 • Введите пароль
 • Если у вас включен Steam Guard, введите код из мобильного приложения
 
 <b>⚠️ Возможные проблемы:</b>
-• <b>Ошибка "InvalidPassword"</b> - неверный логин или пароль
-• <b>Ошибка "AccountLogonDenied"</b> - требуется код Steam Guard
-• <b>Ошибка "ServiceUnavailable"</b> - серверы Steam перегружены, подождите
-• <b>Ошибка "RateLimitExceeded"</b> - слишком много попыток, подождите 5-10 минут
+• <b>"InvalidPassword"</b> - неверный логин или пароль
+• <b>"AccountLogonDenied"</b> - требуется код Steam Guard
+• <b>"ServiceUnavailable"</b> - серверы Steam перегружены, подождите
+• <b>"RateLimitExceeded"</b> - слишком много попыток, подождите 5-10 минут
 
-<b>📱 Требования</b>
-• Действительный аккаунт Steam
-• Steam Guard (рекомендуется)
-• Стабильное интернет-соединение
-
-<b>🔒 Безопасность</b>
-• Бот НЕ хранит ваши пароли
-• Используйте /logout после завершения работы
-• Не передавайте данные бота третьим лицам
-
-<b>🆘 Если ничего не работает:</b>
-1. Войдите в Steam через браузер для снятия блокировок
-2. Убедитесь, что аккаунт не в офлайн-режиме
-3. Попробуйте через VPN (для некоторых регионов)
+<b>💡 Решения:</b>
+1. Войдите в Steam через браузер для снятия блокировки
+2. Убедитесь, что используете имя пользователя, а не email
+3. Если не работает, подождите 10-15 минут
 """
     await update.message.reply_text(help_text, parse_mode='HTML')
 
@@ -224,19 +207,17 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Вы уже выполнили вход! Используйте /logout")
         return
 
-    # Проверяем, не идет ли уже процесс входа
     if user_id in pending_logins:
         await update.message.reply_text("⚠️ Процесс входа уже запущен! Введите данные или используйте /cancel")
         return
 
-    # Начинаем процесс входа
     pending_logins[user_id] = {'step': 'username'}
     
     await update.message.reply_text(
         "🔐 <b>Вход в Steam</b>\n\n"
         "Пожалуйста, отправьте ваш <b>логин</b> (имя пользователя Steam):\n\n"
         "<i>Пример: your_steam_username</i>\n\n"
-        "⚠️ <b>Важно:</b> Это не email, а именно имя учетной записи\n\n"
+        "⚠️ <b>Важно:</b> Это НЕ email, а именно имя учетной записи\n\n"
         "Для отмены используйте /cancel",
         parse_mode='HTML'
     )
@@ -249,11 +230,10 @@ async def process_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in pending_logins or pending_logins[user_id]['step'] != 'username':
         return False
     
-    # Простая валидация логина
     if len(username) < 3:
         await update.message.reply_text(
             "❌ Слишком короткий логин. Логин должен содержать минимум 3 символа.\n"
-            "Попробуйте снова или используйте /cancel для отмены"
+            "Попробуйте снова или используйте /cancel"
         )
         return True
     
@@ -263,7 +243,6 @@ async def process_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Логин сохранен: <b>{username}</b>\n\n"
         "Теперь отправьте ваш <b>пароль</b>:\n"
-        "⚠️ Пароль не будет сохранен, он нужен только для входа\n\n"
         "Для отмены используйте /cancel",
         parse_mode='HTML'
     )
@@ -286,33 +265,26 @@ async def process_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     username = pending_logins[user_id]['username']
     
-    # Отправляем сообщение о начале входа
     status_msg = await update.message.reply_text(
-        f"⏳ Выполняется вход в Steam для пользователя <b>{username}</b>...\n"
+        f"⏳ Выполняется вход в Steam для <b>{username}</b>...\n"
         f"Это может занять до 30 секунд",
         parse_mode='HTML'
     )
     
-    # Создаем менеджер аутентификации
     auth_manager = SteamAuthManager(user_id)
     context.user_data['auth_manager'] = auth_manager
     
-    # Пытаемся войти
     result = await auth_manager.login(username, password)
     
     if result.get('needs_2fa'):
-        # Требуется двухфакторная аутентификация
         pending_logins[user_id]['step'] = '2fa'
         pending_logins[user_id]['auth_manager'] = auth_manager
-        pending_logins[user_id]['password'] = password  # Временно сохраняем пароль для 2FA
+        pending_logins[user_id]['password'] = password
         
         await status_msg.delete()
         await update.message.reply_text(
             "🔐 <b>Требуется код двухфакторной аутентификации</b>\n\n"
-            "1. Откройте приложение Steam на телефоне\n"
-            "2. Перейдите в Steam Guard\n"
-            "3. Скопируйте 5-значный код\n"
-            "4. Отправьте его сюда\n\n"
+            "Откройте приложение Steam Guard на телефоне и отправьте 5-значный код:\n\n"
             "<i>Пример: 12345</i>\n\n"
             "Для отмены используйте /cancel",
             parse_mode='HTML'
@@ -322,7 +294,6 @@ async def process_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_sessions[user_id] = auth_manager
         user_info = auth_manager.get_user_info()
         
-        # Очищаем ожидание
         del pending_logins[user_id]
         
         success_text = (
@@ -339,8 +310,7 @@ async def process_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ <b>Ошибка входа</b>\n\n{result['message']}\n\n"
             f"💡 <b>Советы:</b>\n"
             f"• Проверьте правильность логина и пароля\n"
-            f"• Если включен Steam Guard, используйте /login заново\n"
-            f"• Войдите в Steam через браузер для снятия блокировки\n"
+            f"• Используйте имя пользователя, а не email\n"
             f"• Подождите несколько минут и попробуйте снова\n\n"
             f"Для повторной попытки используйте /login",
             parse_mode='HTML'
@@ -357,11 +327,10 @@ async def process_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in pending_logins or pending_logins[user_id]['step'] != '2fa':
         return False
     
-    # Валидация кода
     if not twofa_code.isdigit() or len(twofa_code) != 5:
         await update.message.reply_text(
             "❌ Неверный формат кода. Код должен состоять из 5 цифр.\n"
-            "Попробуйте снова или используйте /cancel для отмены"
+            "Попробуйте снова или используйте /cancel"
         )
         return True
     
@@ -403,10 +372,10 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id not in user_sessions:
-        await update.message.reply_text("❌ Вы не авторизованы в Steam. Используйте /login для входа")
+        await update.message.reply_text("❌ Вы не авторизованы в Steam")
         return
     
-    status_msg = await update.message.reply_text("⏳ Выполняется выход из аккаунта...")
+    status_msg = await update.message.reply_text("⏳ Выполняется выход...")
     
     auth_manager = user_sessions[user_id]
     success = await auth_manager.logout()
@@ -415,34 +384,29 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if success:
         del user_sessions[user_id]
-        await update.message.reply_text(
-            "✅ <b>Вы успешно вышли из аккаунта Steam</b>\n\n"
-            "Для повторного входа используйте /login",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("✅ <b>Вы вышли из аккаунта Steam</b>\n\n/login - для входа", parse_mode='HTML')
     else:
-        await update.message.reply_text("❌ Ошибка при выходе из аккаунта")
+        await update.message.reply_text("❌ Ошибка при выходе")
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Информация профиля"""
     user_id = update.effective_user.id
     
     if user_id not in user_sessions:
-        await update.message.reply_text("❌ Вы не авторизованы в Steam. Используйте /login для входа")
+        await update.message.reply_text("❌ Вы не авторизованы в Steam. Используйте /login")
         return
     
     auth_manager = user_sessions[user_id]
     user_info = auth_manager.get_user_info()
     
     if not user_info:
-        await update.message.reply_text("❌ Не удалось получить информацию профиля. Возможно, сессия истекла.")
+        await update.message.reply_text("❌ Не удалось получить информацию профиля")
         return
     
     profile_text = (
         f"👤 <b>Профиль Steam</b>\n\n"
         f"🔹 <b>Имя:</b> {user_info.get('name', 'Неизвестно')}\n"
-        f"🔹 <b>Steam ID:</b> {user_info.get('id', 'Неизвестно')}\n"
-        f"🔹 <b>Страна:</b> {user_info.get('country', 'Не указана')}\n\n"
+        f"🔹 <b>Steam ID:</b> {user_info.get('id', 'Неизвестно')}\n\n"
         f"✅ <b>Статус:</b> Активен"
     )
     
@@ -454,10 +418,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in pending_logins:
         del pending_logins[user_id]
-        await update.message.reply_text(
-            "❌ Процесс входа отменен\n\n"
-            "Для новой попытки используйте /login"
-        )
+        await update.message.reply_text("❌ Процесс входа отменен\n\nДля новой попытки используйте /login")
     else:
         await update.message.reply_text("Нет активного процесса входа")
 
@@ -465,7 +426,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка всех текстовых сообщений"""
     user_id = update.effective_user.id
     
-    # Проверяем, идет ли процесс входа
     if user_id in pending_logins:
         step = pending_logins[user_id]['step']
         
@@ -476,18 +436,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == '2fa':
             await process_2fa(update, context)
     else:
-        # Если не в процессе входа, отправляем меню
         await update.message.reply_text(
             "🤖 <b>Доступные команды:</b>\n\n"
             "/login - Войти в Steam\n"
             "/profile - Информация профиля\n"
-            "/logout - Выйти из аккаунта\n"
+            "/logout - Выйти\n"
             "/help - Помощь",
             parse_mode='HTML'
         )
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка callback-запросов от кнопок"""
+    """Обработка callback-запросов"""
     query = update.callback_query
     await query.answer()
     
@@ -499,25 +458,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный обработчик ошибок"""
     logger.error(f"Exception: {context.error}")
-    
-    error_text = "❌ Произошла техническая ошибка. Пожалуйста, попробуйте позже."
-    
-    try:
-        if update and update.effective_message:
-            await update.effective_message.reply_text(error_text)
-    except:
-        pass
 
 def main():
     """Запуск бота"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     
     if not token:
-        logger.error("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
-        print("ОШИБКА: Установите переменную окружения TELEGRAM_BOT_TOKEN")
+        logger.error("TELEGRAM_BOT_TOKEN не найден")
+        print("ОШИБКА: Установите TELEGRAM_BOT_TOKEN")
         return
     
-    # Создаем приложение
+    # Сбрасываем вебхук перед запуском
+    import requests
+    try:
+        requests.get(f"https://api.telegram.org/bot{token}/deleteWebhook")
+        logger.info("Webhook deleted")
+    except:
+        pass
+    
     application = Application.builder().token(token).build()
     
     # Добавляем обработчики
@@ -531,11 +489,11 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     
-    # Запускаем бота
-    logger.info("🚀 Бот запущен и готов к работе")
+    logger.info("🚀 Бот запущен")
     print("✅ Бот успешно запущен!")
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Запускаем с очисткой старых обновлений
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
