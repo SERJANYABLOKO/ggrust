@@ -2,11 +2,13 @@ import os
 import logging
 import time
 import requests
+import sqlite3
+import hashlib
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 from steam.client import SteamClient
 from steam.enums import EResult
-import random
 
 # Настройка логирования
 logging.basicConfig(
@@ -18,6 +20,167 @@ logger = logging.getLogger(__name__)
 # Хранилище сессий пользователей
 user_sessions = {}
 pending_logins = {}
+
+class Database:
+    def __init__(self, db_path='steam_accounts.db'):
+        self.db_path = db_path
+        self.init_db()
+    
+    def init_db(self):
+        """Инициализация базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Таблица для хранения аккаунтов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS steam_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                steam_id TEXT,
+                profile_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP,
+                login_count INTEGER DEFAULT 1,
+                UNIQUE(telegram_id, username)
+            )
+        ''')
+        
+        # Таблица для логов входов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS login_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN,
+                error_message TEXT,
+                ip_address TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("База данных инициализирована")
+    
+    def save_account(self, telegram_id, username, password, steam_id=None, profile_name=None):
+        """Сохранение аккаунта в базу"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Проверяем, существует ли уже аккаунт
+            cursor.execute('SELECT id, login_count FROM steam_accounts WHERE telegram_id = ? AND username = ?', 
+                          (telegram_id, username))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Обновляем существующий аккаунт
+                cursor.execute('''
+                    UPDATE steam_accounts 
+                    SET password = ?, steam_id = ?, profile_name = ?, 
+                        last_login = CURRENT_TIMESTAMP, login_count = login_count + 1
+                    WHERE telegram_id = ? AND username = ?
+                ''', (password, steam_id, profile_name, telegram_id, username))
+                logger.info(f"Обновлен аккаунт {username} для пользователя {telegram_id}")
+            else:
+                # Добавляем новый аккаунт
+                cursor.execute('''
+                    INSERT INTO steam_accounts (telegram_id, username, password, steam_id, profile_name)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (telegram_id, username, password, steam_id, profile_name))
+                logger.info(f"Сохранен новый аккаунт {username} для пользователя {telegram_id}")
+            
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения аккаунта: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_accounts(self, telegram_id):
+        """Получение всех аккаунтов пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT username, steam_id, profile_name, created_at, last_login, login_count
+            FROM steam_accounts 
+            WHERE telegram_id = ?
+            ORDER BY last_login DESC
+        ''', (telegram_id,))
+        
+        accounts = cursor.fetchall()
+        conn.close()
+        return accounts
+    
+    def get_account(self, telegram_id, username):
+        """Получение конкретного аккаунта"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT username, password, steam_id, profile_name
+            FROM steam_accounts 
+            WHERE telegram_id = ? AND username = ?
+        ''', (telegram_id, username))
+        
+        account = cursor.fetchone()
+        conn.close()
+        return account
+    
+    def delete_account(self, telegram_id, username):
+        """Удаление аккаунта"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM steam_accounts WHERE telegram_id = ? AND username = ?', 
+                      (telegram_id, username))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+    
+    def log_login(self, telegram_id, username, success, error_message=None, ip_address=None):
+        """Логирование попыток входа"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO login_logs (telegram_id, username, success, error_message, ip_address)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (telegram_id, username, success, error_message, ip_address))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_login_stats(self, telegram_id):
+        """Статистика входов пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total_logins,
+                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful_logins,
+                COUNT(DISTINCT username) as unique_accounts
+            FROM login_logs 
+            WHERE telegram_id = ?
+        ''', (telegram_id,))
+        
+        stats = cursor.fetchone()
+        conn.close()
+        
+        return {
+            'total': stats[0] or 0,
+            'successful': stats[1] or 0,
+            'unique_accounts': stats[2] or 0
+        }
+
+# Инициализируем базу данных
+db = Database()
 
 class SteamAuthManager:
     def __init__(self, user_id: int):
@@ -46,10 +209,8 @@ class SteamAuthManager:
         self.login_result = None
         
         try:
-            # Устанавливаем таймауты для подключения
             self.client.set_connection_timeout(30)
             
-            # Пытаемся войти
             if twofa_code:
                 result = self.client.login(
                     username=username,
@@ -62,7 +223,6 @@ class SteamAuthManager:
                     password=password
                 )
             
-            # Обработка кодов ошибок
             if result == EResult.OK:
                 logger.info(f"Login OK for {username}")
                 time.sleep(2)
@@ -86,7 +246,7 @@ class SteamAuthManager:
             elif result == EResult.TryAnotherCM:
                 return {'success': False, 'message': '🔄 Попробуйте другой сервер подключения. Подождите 5 минут'}
             
-            elif result == 85:  # RateLimitExceeded
+            elif result == 85:
                 return {'success': False, 'message': '⚠️ Лимит попыток входа превышен! (Ошибка 85)\n\nПодождите 1 час перед следующей попыткой.\nВойдите в Steam через браузер для разблокировки.'}
             
             else:
@@ -125,13 +285,17 @@ def start(update: Update, context):
     welcome_text = """
 🎮 <b>Steam Auth Bot</b>
 
-Добро пожаловать! Бот поможет войти в аккаунт Steam.
+Добро пожаловать! Бот поможет войти в аккаунт Steam и сохраняет все ваши аккаунты.
 
 <b>Команды:</b>
 /start - Это сообщение
 /login - Войти в Steam
 /logout - Выйти
 /profile - Информация профиля
+/myaccounts - Мои сохраненные аккаунты
+/switch - Переключиться на другой аккаунт
+/delaccount - Удалить сохраненный аккаунт
+/stats - Статистика
 /cancel - Отменить вход
 /help - Помощь
 
@@ -178,8 +342,139 @@ def help_command(update: Update, context):
 """
     update.message.reply_text(help_text, parse_mode='HTML')
 
+def myaccounts(update: Update, context):
+    user_id = update.effective_user.id
+    accounts = db.get_accounts(user_id)
+    
+    if not accounts:
+        update.message.reply_text(
+            "📭 <b>У вас нет сохраненных аккаунтов</b>\n\n"
+            "Используйте /login чтобы добавить аккаунт",
+            parse_mode='HTML'
+        )
+        return
+    
+    text = "📋 <b>Ваши сохраненные аккаунты Steam</b>\n\n"
+    
+    for i, account in enumerate(accounts, 1):
+        username, steam_id, profile_name, created_at, last_login, login_count = account
+        
+        text += f"{i}. <b>{username}</b>\n"
+        if profile_name:
+            text += f"   👤 Имя: {profile_name}\n"
+        if steam_id:
+            text += f"   🆔 Steam ID: {steam_id}\n"
+        text += f"   📅 Добавлен: {created_at[:10]}\n"
+        if last_login:
+            text += f"   🔑 Последний вход: {last_login[:10]}\n"
+        text += f"   📊 Входов: {login_count}\n\n"
+    
+    text += "\n<b>Команды:</b>\n"
+    text += "/switch <логин> - Переключиться на аккаунт\n"
+    text += "/delaccount <логин> - Удалить аккаунт"
+    
+    update.message.reply_text(text, parse_mode='HTML')
+
+def switch_account(update: Update, context):
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        accounts = db.get_accounts(user_id)
+        if not accounts:
+            update.message.reply_text("❌ У вас нет сохраненных аккаунтов")
+            return
+        
+        text = "🔄 <b>Переключение аккаунта</b>\n\n"
+        text += "Используйте: /switch <логин>\n\n"
+        text += "<b>Доступные аккаунты:</b>\n"
+        for account in accounts:
+            text += f"• {account[0]}\n"
+        
+        update.message.reply_text(text, parse_mode='HTML')
+        return
+    
+    username = ' '.join(context.args)
+    account = db.get_account(user_id, username)
+    
+    if not account:
+        update.message.reply_text(f"❌ Аккаунт {username} не найден")
+        return
+    
+    if user_id in user_sessions:
+        user_sessions[user_id].logout()
+        del user_sessions[user_id]
+    
+    # Сохраняем для автоматического входа
+    context.user_data['auto_login'] = {
+        'username': account[0],
+        'password': account[1]
+    }
+    
+    update.message.reply_text(
+        f"🔄 <b>Переключение на {username}</b>\n\n"
+        f"Используйте /login для входа с сохраненными данными",
+        parse_mode='HTML'
+    )
+
+def delaccount(update: Update, context):
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        accounts = db.get_accounts(user_id)
+        if not accounts:
+            update.message.reply_text("❌ У вас нет сохраненных аккаунтов")
+            return
+        
+        text = "🗑 <b>Удаление аккаунта</b>\n\n"
+        text += "Используйте: /delaccount <логин>\n\n"
+        text += "<b>Ваши аккаунты:</b>\n"
+        for account in accounts:
+            text += f"• {account[0]}\n"
+        
+        update.message.reply_text(text, parse_mode='HTML')
+        return
+    
+    username = ' '.join(context.args)
+    
+    if db.delete_account(user_id, username):
+        # Если удаляем текущую сессию
+        if user_id in user_sessions:
+            current = user_sessions[user_id].get_user_info()
+            if current and current['name'] == username:
+                user_sessions[user_id].logout()
+                del user_sessions[user_id]
+        
+        update.message.reply_text(f"✅ Аккаунт {username} удален")
+    else:
+        update.message.reply_text(f"❌ Аккаунт {username} не найден")
+
+def stats(update: Update, context):
+    user_id = update.effective_user.id
+    stats_data = db.get_login_stats(user_id)
+    accounts = db.get_accounts(user_id)
+    
+    text = "📊 <b>Ваша статистика</b>\n\n"
+    text += f"📝 Всего аккаунтов: {len(accounts)}\n"
+    text += f"🔑 Попыток входа: {stats_data['total']}\n"
+    text += f"✅ Успешных входов: {stats_data['successful']}\n"
+    text += f"📈 Успешность: {int(stats_data['successful']/stats_data['total']*100) if stats_data['total'] > 0 else 0}%\n"
+    
+    update.message.reply_text(text, parse_mode='HTML')
+
 def login(update: Update, context):
     user_id = update.effective_user.id
+    
+    # Проверяем, есть ли данные для автоматического входа
+    if context.user_data.get('auto_login'):
+        auto = context.user_data['auto_login']
+        update.message.reply_text(
+            f"🔐 <b>Найден сохраненный аккаунт</b>\n\n"
+            f"Аккаунт: {auto['username']}\n\n"
+            f"Используйте /autologin для быстрого входа\n"
+            f"Или /login для ручного ввода",
+            parse_mode='HTML'
+        )
+        return
     
     if user_id in user_sessions:
         update.message.reply_text("❌ Вы уже вошли! Используйте /logout")
@@ -202,6 +497,75 @@ def login(update: Update, context):
         parse_mode='HTML'
     )
 
+def autologin(update: Update, context):
+    """Автоматический вход с сохраненными данными"""
+    user_id = update.effective_user.id
+    
+    if not context.user_data.get('auto_login'):
+        update.message.reply_text("❌ Нет сохраненных данных для автоматического входа")
+        return
+    
+    auto = context.user_data['auto_login']
+    username = auto['username']
+    password = auto['password']
+    
+    status_msg = update.message.reply_text(
+        f"⏳ Автоматический вход для <b>{username}</b>...",
+        parse_mode='HTML'
+    )
+    
+    auth_manager = SteamAuthManager(user_id)
+    result = auth_manager.login(username, password)
+    
+    try:
+        status_msg.delete()
+    except:
+        pass
+    
+    if result.get('needs_2fa'):
+        pending_logins[user_id] = {
+            'step': '2fa', 
+            'username': username,
+            'password': password,
+            'auth_manager': auth_manager,
+            'attempts': 0
+        }
+        update.message.reply_text(
+            f"🔐 <b>Требуется код Steam Guard для {username}</b>\n\n"
+            f"Отправьте 5-значный код из приложения Steam:\n"
+            f"/cancel - отмена",
+            parse_mode='HTML'
+        )
+    elif result['success']:
+        user_sessions[user_id] = auth_manager
+        user_info = auth_manager.get_user_info()
+        
+        # Сохраняем в базу
+        db.save_account(
+            user_id, 
+            username, 
+            password,
+            user_info.get('id') if user_info else None,
+            user_info.get('name') if user_info else None
+        )
+        db.log_login(user_id, username, True)
+        
+        update.message.reply_text(
+            f"✅ <b>Вход выполнен!</b>\n\n"
+            f"👤 {username}\n\n"
+            f"/profile - информация\n"
+            f"/logout - выход",
+            parse_mode='HTML'
+        )
+    else:
+        db.log_login(user_id, username, False, result['message'])
+        update.message.reply_text(
+            f"❌ <b>Ошибка входа</b>\n\n"
+            f"{result['message']}\n\n"
+            f"/login - ручной вход",
+            parse_mode='HTML'
+        )
+
 def cancel(update: Update, context):
     user_id = update.effective_user.id
     
@@ -221,6 +585,10 @@ def logout(update: Update, context):
     auth_manager = user_sessions[user_id]
     auth_manager.logout()
     del user_sessions[user_id]
+    
+    # Очищаем авто-вход
+    if 'auto_login' in context.user_data:
+        del context.user_data['auto_login']
     
     update.message.reply_text("✅ Вы вышли из аккаунта\n\n/login - для входа", parse_mode='HTML')
 
@@ -268,7 +636,6 @@ def handle_message(update: Update, context):
                 update.message.reply_text("❌ Слишком короткий пароль. Попробуйте снова")
                 return
             
-            # Увеличиваем счетчик попыток
             pending_logins[user_id]['attempts'] = pending_logins[user_id].get('attempts', 0) + 1
             attempts = pending_logins[user_id]['attempts']
             
@@ -297,7 +664,6 @@ def handle_message(update: Update, context):
                 parse_mode='HTML'
             )
             
-            # Создаем менеджер и пробуем войти
             auth_manager = SteamAuthManager(user_id)
             result = auth_manager.login(username, password)
             
@@ -318,16 +684,30 @@ def handle_message(update: Update, context):
                 )
             elif result['success']:
                 user_sessions[user_id] = auth_manager
+                user_info = auth_manager.get_user_info()
+                
+                # Сохраняем в базу данных
+                db.save_account(
+                    user_id, 
+                    username, 
+                    password,
+                    user_info.get('id') if user_info else None,
+                    user_info.get('name') if user_info else None
+                )
+                db.log_login(user_id, username, True)
+                
                 del pending_logins[user_id]
                 update.message.reply_text(
-                    f"✅ <b>Вход выполнен!</b>\n\n"
+                    f"✅ <b>Вход выполнен и аккаунт сохранен!</b>\n\n"
                     f"👤 {username}\n\n"
                     f"/profile - информация\n"
+                    f"/myaccounts - все аккаунты\n"
                     f"/logout - выход",
                     parse_mode='HTML'
                 )
             else:
-                # Не удаляем pending_login, чтобы можно было попробовать снова
+                db.log_login(user_id, username, False, result['message'])
+                
                 if attempts >= 3:
                     del pending_logins[user_id]
                 
@@ -360,15 +740,29 @@ def handle_message(update: Update, context):
             
             if result['success']:
                 user_sessions[user_id] = auth_manager
+                user_info = auth_manager.get_user_info()
+                
+                # Сохраняем в базу данных
+                db.save_account(
+                    user_id, 
+                    username, 
+                    password,
+                    user_info.get('id') if user_info else None,
+                    user_info.get('name') if user_info else None
+                )
+                db.log_login(user_id, username, True)
+                
                 del pending_logins[user_id]
                 update.message.reply_text(
-                    f"✅ <b>Вход выполнен!</b>\n\n"
+                    f"✅ <b>Вход выполнен и аккаунт сохранен!</b>\n\n"
                     f"👤 {username}\n\n"
                     f"/profile - информация\n"
+                    f"/myaccounts - все аккаунты\n"
                     f"/logout - выход",
                     parse_mode='HTML'
                 )
             else:
+                db.log_login(user_id, username, False, result['message'])
                 del pending_logins[user_id]
                 update.message.reply_text(
                     f"❌ <b>Ошибка</b>\n\n"
@@ -381,6 +775,7 @@ def handle_message(update: Update, context):
             "🤖 <b>Команды:</b>\n\n"
             "/login - Войти\n"
             "/profile - Профиль\n"
+            "/myaccounts - Мои аккаунты\n"
             "/logout - Выйти\n"
             "/help - Помощь",
             parse_mode='HTML'
@@ -424,8 +819,13 @@ def main():
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("login", login))
+    dp.add_handler(CommandHandler("autologin", autologin))
     dp.add_handler(CommandHandler("logout", logout))
     dp.add_handler(CommandHandler("profile", profile))
+    dp.add_handler(CommandHandler("myaccounts", myaccounts))
+    dp.add_handler(CommandHandler("switch", switch_account))
+    dp.add_handler(CommandHandler("delaccount", delaccount))
+    dp.add_handler(CommandHandler("stats", stats))
     dp.add_handler(CommandHandler("cancel", cancel))
     dp.add_handler(CallbackQueryHandler(handle_callback))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
@@ -433,8 +833,8 @@ def main():
     
     logger.info("🚀 Бот запущен")
     print("✅ Бот успешно запущен!")
+    print("📁 База данных: steam_accounts.db")
     
-    # Запускаем
     updater.start_polling(drop_pending_updates=True)
     updater.idle()
 
