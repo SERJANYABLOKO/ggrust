@@ -14,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ID создателя бота (ваш Telegram ID)
-CREATOR_ID = 123456789  # ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
+CREATOR_ID = 8673619246  # ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
 CREATOR_USERNAME = "@serjantyabloko"
 
 # Хранилище сессий пользователей
